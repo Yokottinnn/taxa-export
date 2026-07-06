@@ -28,7 +28,7 @@ jobs:
   export:
     runs-on: ubuntu-latest
     env:
-      TASKS_PATH: "taxa"       # まず /taxa 全体。中身を見て絞るときは "taxa/tasks" 等に変更
+      TASKS_PATH: "taxa/userTasks"       # まず /taxa 全体。中身を見て絞るときは "taxa/tasks" 等に変更
       OUT_FILE: "tasks.enc"
       HASH_FILE: "tasks.sha256"
     steps:
