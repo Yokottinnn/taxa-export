@@ -1,0 +1,77 @@
+# .github/workflows/export-tasks.yml
+#
+# TAXS タスクを Firebase RTDB から取得し、AES-256 で暗号化して tasks.enc として
+# この（public な）リポジトリに commit する。第三者が見えるのは暗号文だけ。
+# 私(Claude)は tasks.enc を raw で取得し、設定に置いた復号鍵で復号して読む。
+#
+# ▼ 置き場所
+#   専用の public リポジトリ（例: Yokottinnn/taxa-export）を新規作成し、その中に置く。
+#   アプリ本体リポジトリ(taxa-tasks)は private のまま一切触らない。
+#
+# ▼ このリポジトリの Settings > Secrets and variables > Actions に登録する秘密（3つ）
+#   FIREBASE_DB_URL    … 例 https://xxxx-default-rtdb.firebaseio.com  (末尾スラッシュ無し)
+#   FIREBASE_DB_SECRET … Firebase の DB シークレット（?auth= に渡すトークン）
+#   EXPORT_ENC_KEY     … 書き出し専用の対称鍵。`openssl rand -base64 32` で生成した値。
+#                        ※ この同じ値を、あなたのユーザー設定にも「復号鍵」として貼る。
+
+name: export-taxa-tasks
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # 20分ごと。頻度は自由
+  workflow_dispatch: {}        # 手動実行も可
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    env:
+      TASKS_PATH: "taxa"       # まず /taxa 全体。中身を見て絞るときは "taxa/tasks" 等に変更
+      OUT_FILE: "tasks.enc"
+      HASH_FILE: "tasks.sha256"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch from Firebase and build plaintext
+        run: |
+          curl -sfS \
+            "${{ secrets.FIREBASE_DB_URL }}/${TASKS_PATH}.json?auth=${{ secrets.FIREBASE_DB_SECRET }}" \
+            -o /tmp/raw.json
+          # 取得時刻を添えて包む（鮮度確認用）
+          jq -n --slurpfile t /tmp/raw.json \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{exported_at:$ts, tasks:$t[0]}' > /tmp/plain.json
+
+      - name: Skip if unchanged
+        id: diff
+        run: |
+          NEW=$(sha256sum /tmp/plain.json | awk '{print $1}')
+          OLD=$(cat "$HASH_FILE" 2>/dev/null || echo none)
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "$NEW" > "$HASH_FILE"
+          fi
+
+      - name: Encrypt
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          openssl enc -aes-256-cbc -pbkdf2 -md sha256 -iter 100000 -salt -base64 -A \
+            -pass pass:"${{ secrets.EXPORT_ENC_KEY }}" \
+            -in /tmp/plain.json -out "$OUT_FILE"
+
+      - name: Commit if changed
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name  "taxa-export-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add "$OUT_FILE" "$HASH_FILE"
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "export $(date -u +%FT%TZ)"
+            git push
+          fi
